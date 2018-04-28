@@ -4,15 +4,16 @@ import (
 	"fmt"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/mysql"
+	"github.com/kirthiprakash/tech-talk-tekion-201804/app"
 )
 
 var _db *gorm.DB
 
 func init() {
-	username := "root"
-	password := "root"
-	host := "localhost"
-	databaseName := "analytics"
+	username := app.MysqlUsername
+	password := app.MysqlPassword
+	host := app.MysqlHost
+	databaseName := app.MysqlDBName
 	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true", username, password, host, databaseName)
 	var openErr error
 	_db, openErr = gorm.Open("mysql", dsn)
@@ -32,3 +33,6 @@ func GetConnection() (*gorm.DB, error) {
 	return _db, nil
 }
 
+func CloseConnection() {
+	_db.Close()
+}
