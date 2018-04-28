@@ -1,6 +1,6 @@
 # tech-talk-tekion-201804
 
-**Summary of the talk**
+****Summary of the talk****
 
 The talk discusses database querying time for aggregation operations on a table with one million rows and 10 million
 rows. (Avg. row size is ~100B)
@@ -66,7 +66,7 @@ The script takes approx. 30 mins to insert 1 million appointments and It takes a
 For the purpose of the talk, the appointments were pre-populated with 1 million appointment in the database name 'analyticsOne'.
 Database name 'analyticsTen' had ten million appointments
 
-*Execution Times*
+**Execution Times**
 
 ```
 mysql> use analyticsOne
@@ -183,3 +183,148 @@ switched to db analyticsTen
 479.1015625 (MB)
 ```
 
+**Approaches to minimize query execution time**
+
+* Sharding (time based OR tenant based)
+* Pre-computation
+
+For the purpose of the talk, we discussed how pre-computing data helps minimize the query execution time.
+Pre-computing data requires an additional steps on insertion of a new appointment as we maintain a separate table to store 
+the pre-computed data. There are different approached to model the pre-computed table. It could be modelled as a 
+time-based series or indexed by appointment type.
+On every insertion of a new appointment, we need to update the pre-computed table by incrementing the appropriate count.
+Like wise, on every cancellation of appointment we have the down count the metrics. Appointment creation and reports update should
+be treated as an atomic transaction other wise we could lose the integrity between two tables and they can easily go out of sync.
+
+Pandi suggested we could use at database triggers that would retain the integrity between the two tables. Bala added, triggers can lead
+to vendor lock-in situation where we cannot easily switch the RDBMS system as the syntax might vary.
+
+```
+mysql> desc reports;
++----------------------------------+------------------+------+-----+---------+-------+
+| Field                            | Type             | Null | Key | Default | Extra |
++----------------------------------+------------------+------+-----+---------+-------+
+| id                               | varchar(255)     | NO   | PRI | NULL    |       |
+| appointment_date                 | timestamp        | YES  |     | NULL    |       |
+| appointment_type_pdi_count       | int(10) unsigned | YES  |     | NULL    |       |
+| appointment_type_scheduled_count | int(10) unsigned | YES  |     | NULL    |       |
+| appointment_type_walkin_count    | int(10) unsigned | YES  |     | NULL    |       |
++----------------------------------+------------------+------+-----+---------+-------+
+```
+
+```
+mysql> select * from reports limit 5;
++----------+---------------------+----------------------------+----------------------------------+-------------------------------+
+| id       | appointment_date    | appointment_type_pdi_count | appointment_type_scheduled_count | appointment_type_walkin_count |
++----------+---------------------+----------------------------+----------------------------------+-------------------------------+
+| 20150101 | 2015-01-01 00:00:00 |                        352 |                              343 |                           380 |
+| 20150102 | 2015-01-02 00:00:00 |                        366 |                              367 |                           341 |
+| 20150103 | 2015-01-03 00:00:00 |                        373 |                              343 |                           339 |
+| 20150104 | 2015-01-04 00:00:00 |                        392 |                              391 |                           357 |
+| 20150105 | 2015-01-05 00:00:00 |                        371 |                              382 |                           363 |
++----------+---------------------+----------------------------+----------------------------------+-------------------------------+
+```
+
+```
+mysql> select count(*) from reports;
++----------+
+| count(*) |
++----------+
+|      891 |
++----------+
+```
+
+```
+mysql> select year(appointment_date), month(appointment_date), sum(appointment_type_pdi_count) from reports group by year(appointment_date), month(appointment_date);
++------------------------+-------------------------+---------------------------------+
+| year(appointment_date) | month(appointment_date) | sum(appointment_type_pdi_count) |
++------------------------+-------------------------+---------------------------------+
+|                   2015 |                       1 |                           10162 |
+|                   2015 |                       2 |                           10075 |
+... rows collasped
+|                   2017 |                       8 |                           10166 |
+|                   2017 |                       9 |                           10103 |
+|                   2017 |                      10 |                           10168 |
+|                   2017 |                      11 |                           10087 |
++------------------------+-------------------------+---------------------------------+
+33 rows in set (0.01 sec)
+
+```
+
+We can still optimise the querying by storing the time based series in a hierarchical structure, but at the cost of a costly update.
+We can store computed data at each level of hierarchy. As we add more hierarchy, we need to traverse deep to do an update.
+A NoSQL database like MongoDB can be used to store the hierarchy.
+
+```
+db.report.findOne()
+{
+	"_id" : "201503",
+	"date" : ISODate("2015-03-01T00:00:00Z"),
+	"stat" : {
+		"appointmentTypePDICount" : 10002,
+		"appointmentTypeScheduledCount" : 10162,
+		"appointmentTypeWalkinCount" : 10076
+	},
+	"dailyStat" : [
+		{
+			"dayNumber" : 1,
+			"date" : ISODate("2015-03-01T00:00:00Z"),
+			"stat" : {
+				"appointmentTypePDICount" : 395,
+				"appointmentTypeScheduledCount" : 364,
+				"appointmentTypeWalkinCount" : 397
+			}
+		},
+		{
+			"dayNumber" : 2,
+			"date" : ISODate("2015-03-02T00:00:00Z"),
+			"stat" : {
+				"appointmentTypePDICount" : 405,
+				"appointmentTypeScheduledCount" : 364,
+				"appointmentTypeWalkinCount" : 368
+			}
+		},
+		...collapsed
+		{
+			"dayNumber" : 30,
+			"date" : ISODate("2015-03-30T00:00:00Z"),
+			"stat" : {
+				"appointmentTypePDICount" : 0,
+				"appointmentTypeScheduledCount" : 0,
+				"appointmentTypeWalkinCount" : 0
+			}
+		},
+		{
+			"dayNumber" : 31,
+			"date" : ISODate("2015-03-31T00:00:00Z"),
+			"stat" : {
+				"appointmentTypePDICount" : 0,
+				"appointmentTypeScheduledCount" : 0,
+				"appointmentTypeWalkinCount" : 0
+			}
+		}
+	]
+}
+
+```
+
+```
+db.report.aggregate([
+    {
+        $unwind:"$dailyStat"
+    }, 
+    {
+        $group:
+            {
+                _id:"$dailyStat.date", 
+                count:{
+                    $sum:"$dailyStat.stat.appointmentTypePDICount"
+                    }
+            }
+    }
+    ])
+```
+
+**Further enhancements**
+
+Hitanjan suggested couple of other solutions which included OLAP databases, columnar databases, Data Stream Management systems
